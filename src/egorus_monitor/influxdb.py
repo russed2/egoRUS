@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -54,73 +52,18 @@ class InfluxManager:
         return candidates[0]
 
     def start(self) -> bool:
+        """Попытка подключиться к внешнему серверу InfluxDB (например, в Docker)"""
         if self.health_check(force=True):
             self.enabled = True
             return True
 
-        binary = self.binary_path
-        if not binary.exists():
-            self.last_error = f"InfluxDB не найден: {binary}"
-            self.enabled = False
-            return False
-
-        data_dir = self._resolve(self.config.data_dir)
-        plugin_dir = self._resolve(self.config.plugin_dir)
-        data_dir.mkdir(parents=True, exist_ok=True)
-        plugin_dir.mkdir(parents=True, exist_ok=True)
-        token_file = self.root / "runtime" / "influxdb" / "admin-token.txt"
-        token_file.parent.mkdir(parents=True, exist_ok=True)
-        token_file.write_text(self.config.token, encoding="utf-8")
-
-        args = [
-            str(binary),
-            "serve",
-            "--node-id",
-            "egorus-local",
-            "--object-store",
-            "file",
-            "--data-dir",
-            str(data_dir),
-            "--plugin-dir",
-            str(plugin_dir),
-            "--http-bind",
-            f"{self.config.host}:{self.config.port}",
-            "--without-auth",
-            "--package-manager",
-            "disabled",
-        ]
-
-        try:
-            self.process = subprocess.Popen(
-                args,
-                cwd=str(self.root),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-            )
-        except OSError as exc:
-            self.last_error = f"Не удалось запустить InfluxDB: {exc}"
-            self.enabled = False
-            return False
-
-        for _ in range(25):
-            if self.health_check(force=True):
-                self.enabled = True
-                return True
-            time.sleep(0.2)
-
-        self.last_error = "InfluxDB запущен, но HTTP API не ответил вовремя."
+        self.last_error = "InfluxDB недоступен по сети. Приложение переходит в локальный режим."
         self.enabled = False
         return False
 
     def stop(self) -> None:
-        if self.process and self.process.poll() is None:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=4)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
+        """Отключает запись в InfluxDB при закрытии приложения"""
+        self.enabled = False
         self.process = None
 
     def health_check(self, force: bool = False) -> bool:
