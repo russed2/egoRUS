@@ -1,0 +1,20 @@
+version: '3'
+services:
+  influxdb:
+    image: influxdb:2.7
+    container_name: egorus_influxdb
+    ports:
+      - "8086:8086"
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=adminpassword
+      - DOCKER_INFLUXDB_INIT_ORG=egorus_org
+      - DOCKER_INFLUXDB_INIT_BUCKET=egorus_bucket
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=my-super-secret-auth-token
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+    restart: always
+
+volumes:
+  influxdb_data:
