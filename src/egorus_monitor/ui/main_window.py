@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import threading
-from datetime import timezone
+import pyqtgraph as real_pg
+from datetime import datetime, timezone
 from pathlib import Path
 
 from PySide6.QtCore import QTimer, Qt
@@ -232,26 +233,62 @@ class MainWindow(QMainWindow):
         controls = QHBoxLayout()
         self.history_device_combo = QComboBox()
         self.history_device_combo.currentIndexChanged.connect(lambda _=0: self._update_history())
+        
         self.history_metric_combo = QComboBox()
         self.history_metric_combo.addItems(["V RMS", "Health Index", "Температура", "Пик-фактор"])
         self.history_metric_combo.currentIndexChanged.connect(lambda _=0: self._update_history())
-        refresh = QPushButton("Обновить")
+        
+        # --- ТВОЙ ПОЛНЫЙ СПИСОК ПЕРИОДОВ (В МИНУТАХ) ---
+        self.history_period_combo = QComboBox()
+        self.history_period_combo.addItem("За последние 30 минут", 30)
+        self.history_period_combo.addItem("За последний час", 60)
+        self.history_period_combo.addItem("За последние 3 часа", 180)
+        self.history_period_combo.addItem("За последние 6 часов", 360)
+        self.history_period_combo.addItem("За последние 12 часов", 720)
+        self.history_period_combo.addItem("За последние 24 часа", 1440)
+        self.history_period_combo.addItem("За последние 3 дня", 4320)
+        self.history_period_combo.addItem("За последние 7 дней", 10080)
+        self.history_period_combo.addItem("За последние 14 дней", 20160)
+        self.history_period_combo.addItem("За последний месяц", 43200)
+        self.history_period_combo.addItem("За последние 3 месяца", 129600)
+        self.history_period_combo.addItem("За полгода", 259200)
+        self.history_period_combo.currentIndexChanged.connect(lambda _=0: self._update_history())
+
+        refresh = QPushButton("Загрузить из БД")
+        refresh.setObjectName("AccentButton")
         refresh.clicked.connect(self._update_history)
-        controls.addWidget(QLabel("Агрегат"))
-        controls.addWidget(self.history_device_combo, 1)
-        controls.addWidget(QLabel("Показатель"))
-        controls.addWidget(self.history_metric_combo)
+        
+        controls.addWidget(QLabel("Агрегат:"))
+        controls.addWidget(self.history_device_combo, 2)
+        controls.addWidget(QLabel("Показатель:"))
+        controls.addWidget(self.history_metric_combo, 1)
+        controls.addWidget(QLabel("Период:"))
+        controls.addWidget(self.history_period_combo, 1)
         controls.addWidget(refresh)
         layout.addLayout(controls)
 
-        self.history_plot = pg.PlotWidget()
-        self._style_plot(self.history_plot, "Исторический тренд", "сек", "значение")
-        layout.addWidget(self.history_plot, 1)
+        # Подключаем DateAxisItem, чтобы нижняя ось автоматически подстраивалась под даты
+        axis = real_pg.DateAxisItem(orientation='bottom')
+        self.history_plot_interactive = real_pg.PlotWidget(axisItems={'bottom': axis})
+        self.history_plot_interactive.setBackground("#121b23")
+        self.history_plot_interactive.showGrid(x=True, y=True, alpha=0.3)
+
+        # Блокируем стандартное контекстное меню pyqtgraph на ПКМ
+        self.history_plot_interactive.getPlotItem().setMenuEnabled(False)
+        self.history_plot_interactive.getPlotItem().getViewBox().setMenuEnabled(False)
+        
+        # Запрещаем графику физически опускаться ниже нуля по Y
+        self.history_plot_interactive.getPlotItem().getViewBox().setLimits(yMin=0)
+        
+        # Привязываем отслеживание кликов мыши НАПРЯМУЮ к контейнеру отображения ViewBox
+        self.history_plot_interactive.scene().sigMouseClicked.connect(self._on_history_plot_clicked)
+        
+        layout.addWidget(self.history_plot_interactive, 1)
 
         panel = self._panel("Архив InfluxDB")
         panel_layout = panel.layout()
         assert isinstance(panel_layout, QVBoxLayout)
-        self.history_status = QLabel("При недоступной InfluxDB используется локальный буфер текущей сессии.")
+        self.history_status = QLabel("Выберите параметры и нажмите 'Загрузить из БД'.")
         self.history_status.setObjectName("Muted")
         panel_layout.addWidget(self.history_status)
         layout.addWidget(panel)
@@ -595,7 +632,7 @@ class MainWindow(QMainWindow):
         elif index == 1:
             self._update_realtime()
         elif index == 2:
-            self._update_history()
+            pass
         elif index == 3:
             self._update_analytics()
         elif index == 4:
@@ -678,32 +715,74 @@ class MainWindow(QMainWindow):
 
     def _update_history(self) -> None:
         state = self._selected_state(self.history_device_combo)
-        if not state:
+        if not state or not hasattr(self, "history_plot_interactive"):
             return
+            
         metric = self.history_metric_combo.currentText()
-        self.history_plot.clear()
-        if metric == "Health Index":
-            data = state.history[-360:]
-            if data:
-                self.history_plot.plot(_relative_seconds([h.timestamp for h in data]), [h.hi for h in data], pen=pg.mkPen("#20a08f", width=2))
-                self.history_plot.addLine(y=0.85, pen=pg.mkPen("#ff4d5f", width=1, style=Qt.PenStyle.DashLine))
-        else:
-            data = state.telemetry_history[-360:]
-            if not data:
-                return
-            x = _relative_seconds([p.timestamp for p in data])
-            if metric == "Температура":
-                y = [p.temperature for p in data]
-            elif metric == "Пик-фактор":
-                y = [p.crest_factor for p in data]
-            else:
-                y = [p.vibration_rms for p in data]
-            self.history_plot.plot(x, y, pen=pg.mkPen("#7cb6ff", width=2))
-        if self.controller.influx.enabled:
-            self.history_status.setText("InfluxDB активна: телеметрия и HI пишутся в локальное хранилище временных рядов.")
-        else:
-            self.history_status.setText(f"InfluxDB недоступна: {self.controller.influx.last_error or 'используется локальный буфер'}")
+        minutes_back = self.history_period_combo.currentData()
+        
+        self.history_status.setText(f"Запрос к InfluxDB за последние {minutes_back} мин...")
+        self.history_plot_interactive.clear()
+        
+        # Сбрасываем старые лимиты по оси X перед новой загрузкой, сохраняя пол по Y >= 0
+        self.history_plot_interactive.getPlotItem().getViewBox().setLimits(xMin=None, xMax=None, yMin=0)
+        
+        data = self.controller.influx.read_history(state.equipment.id, minutes_back=int(minutes_back))
+        
+        if not isinstance(data, dict) or (not data.get("telemetry") and not data.get("health")):
+            self.history_status.setText("Данные за выбранный период в базе не найдены.")
+            return
 
+        x_coords = []
+        y_coords = []
+
+        if metric == "Health Index":
+            rows = data.get("health", [])
+            for row in rows:
+                try:
+                    ts = datetime.fromisoformat(row['_time'].replace('Z', '+00:00')).timestamp()
+                    x_coords.append(ts)
+                    y_coords.append(float(row.get('hi', 0)))
+                except: pass
+            color = (32, 160, 143)
+            if x_coords:
+                self.history_plot_interactive.addLine(y=0.85, pen=real_pg.mkPen('#ff4d5f', width=1, style=Qt.PenStyle.DashLine))
+        else:
+            rows = data.get("telemetry", [])
+            for row in rows:
+                try:
+                    ts = datetime.fromisoformat(row['_time'].replace('Z', '+00:00')).timestamp()
+                    x_coords.append(ts)
+                    if metric == "Температура":
+                        y_coords.append(float(row.get('temperature', 0)))
+                    elif metric == "Пик-фактор":
+                        y_coords.append(float(row.get('crest_factor', 0)))
+                    else:
+                        y_coords.append(float(row.get('vibration_rms', 0)))
+                except: pass
+            color = (124, 182, 255)
+
+        if x_coords and y_coords:
+            # Строим линию графика
+            self.history_plot_interactive.plot(x_coords, y_coords, pen=real_pg.mkPen(color=color, width=2))
+            
+            # Настраиваем лимиты перемещения: пользователь сможет крутить и двигать график
+            # только в пределах загруженных данных плюс небольшие отступы по бокам
+            time_range = max(x_coords) - min(x_coords)
+            padding = time_range * 0.05 if time_range > 0 else 60
+            
+            self.history_plot_interactive.getPlotItem().getViewBox().setLimits(
+                xMin=min(x_coords) - padding,
+                xMax=max(x_coords) + padding,
+                yMin=0 # Полная блокировка ухода в минус по вертикали
+            )
+            
+            # Возвращаем фокус на свежие данные
+            self.history_plot_interactive.autoRange()
+            self.history_status.setText(f"Успешно загружено {len(x_coords)} точек. Управление: Колёсико — Зум, ЛКМ — Перетаскивание, ПКМ — Сброс вида.")
+        else:
+            self.history_status.setText("В базе нет данных за этот временной отрезок.")
+            
     def _update_analytics(self) -> None:
         state = self._selected_state(self.analytics_device_combo)
         if not state or not state.health:
@@ -1055,9 +1134,20 @@ class MainWindow(QMainWindow):
 
         threading.Thread(target=runner, name="egorus-influx-start", daemon=True).start()
 
+    def _on_history_plot_clicked(self, event) -> None:
+        """Сброс зума к исходным границам данных при клике ПКМ"""
+        if event.button() == Qt.MouseButton.RightButton:
+            if hasattr(self, "history_plot_interactive"):
+             # Принудительно заставляем внутренний ViewBox сбросить масштаб до авто-границ
+                self.history_plot_interactive.getPlotItem().getViewBox().autoRange()
+                event.accept()
+
 
 def _relative_seconds(timestamps) -> list[float]:
     if not timestamps:
         return []
-    first = timestamps[0].astimezone(timezone.utc)
-    return [(t.astimezone(timezone.utc) - first).total_seconds() for t in timestamps]
+    # Переводим всё в UTC формат
+    ts_utc = [t.astimezone(timezone.utc) for t in timestamps]
+    # Находим САМУЮ РАННЮЮ точку в этом наборе, чтобы график железно начинался от 0
+    first = min(ts_utc)
+    return [(t - first).total_seconds() for t in ts_utc]

@@ -36,7 +36,75 @@ class MonitorController:
         self.persistence_enabled = ok
         if ok:
             self.persistence_worker.start()
+            self._load_history() # Обязательно вызываем функцию здесь!
         return ok
+
+    def _load_history(self) -> None:
+        """Подгружает полную историю (телеметрию и здоровье) из БД"""
+        print("Запрашиваем историю из базы данных...")
+        for eq_id, state in self.states.items():
+            # Запрашиваем данные за неделю (10080 минут) при старте
+            data = self.influx.read_history(eq_id, minutes_back=10080)
+            
+            if not isinstance(data, dict):
+                continue
+
+            # Очищаем стартовый буфер эмулятора, чтобы насадить чистую историю из БД
+            state.telemetry_history.clear()
+            state.history.clear()
+
+            # Загружаем телеметрию
+            for row in data.get("telemetry", []):
+                try:
+                    ts = datetime.fromisoformat(row['_time'].replace('Z', '+00:00'))
+                    pt = TelemetryPoint(
+                        timestamp=ts, equipment_id=eq_id, sensor_id=state.sensor.id,
+                        source="db", scenario="Восстановление", fault_type=FaultType.NONE,
+                        vibration_rms=float(row.get('vibration_rms', 0)),
+                        crest_factor=float(row.get('crest_factor', 0)),
+                        a_spec=float(row.get('a_spec', 0)),
+                        rpm=float(row.get('rpm', 0)),
+                        temperature=float(row.get('temperature', 0)),
+                        one_x_amplitude=float(row.get('one_x_amplitude', 0)),
+                        two_x_amplitude=float(row.get('two_x_amplitude', 0)),
+                        bearing_band_energy=float(row.get('bearing_band_energy', 0)),
+                        broadband_energy=float(row.get('broadband_energy', 0)),
+                        signal_quality=float(row.get('signal_quality', 1.0)),
+                        packet_loss=float(row.get('packet_loss', 0.0))
+                    )
+                    state.telemetry_history.append(pt)
+                except Exception:
+                    pass
+
+            # Загружаем здоровье
+            for row in data.get("health", []):
+                try:
+                    ts = datetime.fromisoformat(row['_time'].replace('Z', '+00:00'))
+                    snap = HealthSnapshot(
+                        timestamp=ts, equipment_id=eq_id, sensor_id=state.sensor.id,
+                        source="db", scenario="Восстановление", fault_type=FaultType.NONE,
+                        hi=float(row.get('hi', 0)), 
+                        rul_hours=float(row.get('rul_hours', 9999.0)), 
+                        risk_zone=RiskZone(row.get('risk_zone', 'A')),
+                        confidence=float(row.get('confidence', 0.0)), 
+                        diagnosis="Загружено", 
+                        trend_per_hour=0.0, recommendation=""
+                    )
+                    state.history.append(snap)
+                except Exception:
+                    pass
+            
+            # Ограничиваем буфер под графики
+            state.telemetry_history = state.telemetry_history[-600:]
+            state.history = state.history[-600:]
+
+            # ПЕРЕДАЕМ ПАМЯТЬ АНАЛИЗАТОРУ: чтобы сглаживание начиналось с последней точки из БД
+            if state.history:
+                last = state.history[-1]
+                self.analyzer._smoothed_hi[eq_id] = last.hi
+                self.analyzer._smoothed_rul[eq_id] = last.rul_hours
+            
+            print(f"Агрегат {eq_id}: УСПЕШНО восстановлено {len(state.history)} точек из реальной БД.")
 
     def stop_influx(self) -> None:
         self.persistence_worker.stop()
@@ -127,7 +195,7 @@ class MonitorController:
             title=title,
             details=details,
         )
-
+    
 
 def format_rul(hours: float) -> str:
     if hours >= 9990:
