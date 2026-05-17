@@ -8,11 +8,13 @@ from egorus_monitor.domain import Equipment, EquipmentState, FaultEvent, FaultTy
 from egorus_monitor.emulator import EmulatorAdapter
 from egorus_monitor.influxdb import InfluxManager
 from egorus_monitor.persistence import AsyncPersistenceWorker
+from egorus_monitor.mqtt_client import MqttAdapter
 
 
 class MonitorController:
     def __init__(self, enable_persistence: bool = True) -> None:
         self.adapter = EmulatorAdapter()
+        self.mqtt = MqttAdapter()
         self.analyzer = PredictiveAnalyzer()
         self.influx = InfluxManager()
         self.persistence_worker = AsyncPersistenceWorker(self.influx)
@@ -21,7 +23,9 @@ class MonitorController:
         self.events: deque[FaultEvent] = deque(maxlen=250)
         self.running = False
         self._last_zone: dict[str, RiskZone] = {}
+        self.discovered_devices: dict[str, TelemetryPoint] = {}
         self._seed_states()
+        
 
     def start(self) -> None:
         self.running = True
@@ -30,6 +34,16 @@ class MonitorController:
     def stop(self) -> None:
         self.running = False
         self.adapter.stop()
+        self.mqtt.stop()
+
+    def start_mqtt_scan(self) -> None:
+        """Запуск сканирования сети"""
+        self.discovered_devices.clear()
+        self.mqtt.start()
+
+    def stop_mqtt_scan(self) -> None:
+        """Остановка сканирования"""
+        self.mqtt.stop()
 
     def start_influx(self) -> bool:
         ok = self.influx.start()
@@ -114,9 +128,21 @@ class MonitorController:
     def tick(self) -> tuple[list[TelemetryPoint], list[HealthSnapshot], list[FaultEvent]]:
         if not self.running:
             return [], [], []
-        points = self.adapter.read()
+            
+        mqtt_points = self.mqtt.read()
+        known_mqtt = []
+        for pt in mqtt_points:
+            if pt.equipment_id not in self.states:
+                # Если датчика нет в системе - откладываем его в буфер для UI-сканера
+                self.discovered_devices[pt.equipment_id] = pt
+            else:
+                # Если датчик уже добавлен - пускаем его на графики
+                known_mqtt.append(pt)
+
+        points = self.adapter.read() + known_mqtt
         snapshots: list[HealthSnapshot] = []
         events: list[FaultEvent] = []
+        
         for point in points:
             health = self.analyzer.process(point)
             snapshots.append(health)

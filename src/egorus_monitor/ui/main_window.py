@@ -464,8 +464,6 @@ class MainWindow(QMainWindow):
         self.new_power.setSuffix(" кВт")
         add_button = QPushButton("Добавить")
         add_button.clicked.connect(lambda _=False: self._add_equipment(show_message=True))
-        for widget in [self.new_name, self.new_location, self.new_rpm, self.new_power, add_button]:
-            form.addWidget(widget)
         add_layout.addLayout(form)
         equipment_layout.addWidget(add_panel)
 
@@ -509,10 +507,16 @@ class MainWindow(QMainWindow):
         adapter_layout = adapter_card.layout()
         assert isinstance(adapter_layout, QVBoxLayout)
         adapter_layout.addWidget(QLabel("Активен: эмулятор СВЧ-датчиков"))
-        mqtt = QLabel("MQTT-клиент заложен как следующий адаптер: topic equipment/{id}/telemetry, JSON payload, checksum/session_id.")
-        mqtt.setObjectName("Muted")
-        mqtt.setWordWrap(True)
-        adapter_layout.addWidget(mqtt)
+        self.mqtt_status = QLabel("MQTT Брокер: ожидание подключения (127.0.0.1:1883)")
+        self.mqtt_status.setObjectName("Muted")
+        self.mqtt_status.setWordWrap(True)
+        adapter_layout.addWidget(self.mqtt_status)
+
+        self.scan_button = QPushButton("Сканировать сеть (Поиск новых датчиков)")
+        self.scan_button.setObjectName("AccentButton")
+        self.scan_button.clicked.connect(self._toggle_mqtt_scan)
+        adapter_layout.addWidget(self.scan_button)
+
         adapters_layout.addWidget(adapter_card)
         adapters_layout.addStretch(1)
 
@@ -616,6 +620,20 @@ class MainWindow(QMainWindow):
         self._update_current_page()
         if self._ui_tick_counter % 5 == 0:
             self._update_connection_status()
+            
+        # --- ПРОВЕРКА НАЙДЕННЫХ УСТРОЙСТВ ---
+        if getattr(self, "_is_scanning_mqtt", False):
+            if self.controller.discovered_devices:
+                # Берем первый пойманный сигнал
+                found_id = list(self.controller.discovered_devices.keys())[0]
+                
+                self.new_name.setText(found_id) # Вписываем ID в форму
+                self._stop_mqtt_scan_ui()       # Закрываем порт
+                self.controller.discovered_devices.clear()
+                
+                # Автоматически переключаем интерфейс на вкладку "Оборудование" (индекс 5)
+                self._select_page(5) 
+                QMessageBox.information(self, "Устройство найдено!", f"Успешно перехвачен сигнал от внешнего датчика: {found_id}.\nДозаполните параметры (Локация, Мощность) и нажмите кнопку 'Добавить'.")
 
     def _update_all_views(self) -> None:
         self._update_dashboard()
@@ -1038,6 +1056,13 @@ class MainWindow(QMainWindow):
             self.connection_badge.setStyleSheet("color: #f0c64b;")
         self.connection_badge.setText(text)
         suffix = " / InfluxDB запускается" if self._influx_starting else ""
+        if hasattr(self, "mqtt_status"):
+            if self.controller.mqtt.connected:
+                self.mqtt_status.setText("MQTT Брокер: ПОДКЛЮЧЕН.")
+                self.mqtt_status.setStyleSheet("color: #35d07f; font-weight: bold;")
+            else:
+                self.mqtt_status.setText("MQTT Брокер: ОТКЛЮЧЕН.")
+                self.mqtt_status.setStyleSheet("color: #ff4d5f;")
         self.runtime_badge.setText(f"Эмулятор: {'запущен' if self.controller.running else 'пауза'}{suffix}")
         if hasattr(self, "influx_status"):
             if ok:
@@ -1141,7 +1166,22 @@ class MainWindow(QMainWindow):
              # Принудительно заставляем внутренний ViewBox сбросить масштаб до авто-границ
                 self.history_plot_interactive.getPlotItem().getViewBox().autoRange()
                 event.accept()
+    
+    def _toggle_mqtt_scan(self) -> None:
+        if not getattr(self, "_is_scanning_mqtt", False):
+            self._is_scanning_mqtt = True
+            self.scan_button.setText("Остановка поиска...")
+            self.scan_button.setStyleSheet("background-color: #f0c64b; color: #111820;")
+            self.controller.start_mqtt_scan()
+            QMessageBox.information(self, "Поиск устройств", "Сетевой порт открыт.\nВключите ваш физический датчик, чтобы он начал отправлять данные. Программа автоматически перехватит сигнал.")
+        else:
+            self._stop_mqtt_scan_ui()
 
+    def _stop_mqtt_scan_ui(self) -> None:
+        self._is_scanning_mqtt = False
+        self.scan_button.setText("Сканировать сеть (Поиск новых датчиков)")
+        self.scan_button.setStyleSheet("")
+        self.controller.stop_mqtt_scan()
 
 def _relative_seconds(timestamps) -> list[float]:
     if not timestamps:
