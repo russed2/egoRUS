@@ -731,6 +731,151 @@ class MainWindow(QMainWindow):
         if point.spectrum:
             self.spectrum_plot.plot(point.spectrum.frequencies, point.spectrum.amplitudes, pen=pg.mkPen("#f0c64b", width=2))
 
+    def _on_add_rt_chart_clicked(self) -> None:
+        eq_id = self.rt_add_device_combo.currentData()
+        metric = self.rt_add_metric_combo.currentData()
+        if eq_id and metric:
+            self._add_rt_chart(str(eq_id), str(metric))
+
+    def _add_rt_chart(self, eq_id: str, metric: str) -> None:
+        state = self.controller.states.get(eq_id)
+        if not state or not hasattr(self, "rt_charts_grid"):
+            return
+            
+        eq_name = state.equipment.name
+        metric_name = dict(DYNAMIC_CHART_OPTIONS).get(metric, metric)
+        
+        card = QFrame()
+        card.setObjectName("Panel")
+        card.setMinimumHeight(300)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(14, 14, 14, 14)
+        
+        header = QHBoxLayout()
+        title = QLabel(f"{eq_name} — {metric_name}")
+        title.setObjectName("SectionTitle")
+        remove = QPushButton("✖")
+        remove.setFixedWidth(30)
+        remove.clicked.connect(lambda _=False, target=card: self._remove_rt_chart(target))
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(remove)
+        layout.addLayout(header)
+
+        plot = pg.PlotWidget()
+        plot.setMinimumHeight(230)
+        layout.addWidget(plot, 1)
+        
+        self.rt_chart_cards.append({"card": card, "plot": plot, "eq_id": eq_id, "metric": metric})
+        self._reflow_rt_charts()
+        self._update_rt_charts()
+
+    def _remove_rt_chart(self, target: QFrame) -> None:
+        for index, item in enumerate(list(self.rt_chart_cards)):
+            if item["card"] is target:
+                self.rt_charts_grid.removeWidget(target)
+                target.setParent(None)
+                target.deleteLater()
+                del self.rt_chart_cards[index]
+                break
+        self._reflow_rt_charts()
+
+    def _clear_rt_charts(self) -> None:
+        for item in list(self.rt_chart_cards):
+            card = item["card"]
+            assert isinstance(card, QFrame)
+            self.rt_charts_grid.removeWidget(card)
+            card.setParent(None)
+            card.deleteLater()
+        self.rt_chart_cards.clear()
+
+    def _reflow_rt_charts(self) -> None:
+        for item in self.rt_chart_cards:
+            card = item["card"]
+            assert isinstance(card, QFrame)
+            self.rt_charts_grid.removeWidget(card)
+        for index, item in enumerate(self.rt_chart_cards):
+            card = item["card"]
+            assert isinstance(card, QFrame)
+            self.rt_charts_grid.addWidget(card, index // 2, index % 2)
+        self.rt_charts_grid.setColumnStretch(0, 1)
+        self.rt_charts_grid.setColumnStretch(1, 1)
+
+    def _update_rt_charts(self) -> None:
+        for item in getattr(self, "rt_chart_cards", []):
+            eq_id = item["eq_id"]
+            metric = item["metric"]
+            plot = item["plot"]
+            assert isinstance(plot, pg.PlotWidget)
+            state = self.controller.states.get(eq_id)
+            self._draw_dynamic_chart(plot, str(metric), state)
+
+    def _draw_dynamic_chart(self, plot: pg.PlotWidget, metric: str, state: EquipmentState | None) -> None:
+        _, bottom, left = self._dynamic_chart_meta(metric)
+        plot.clear()
+        self._style_plot(plot, "", bottom, left) # Название уже есть в шапке панели
+        if not state:
+            return
+            
+        points = state.telemetry_history[-90:]
+        health_points = state.history[-90:]
+        point = state.telemetry
+
+        if metric == "vibration":
+            self._plot_telemetry_series(plot, points, [p.vibration_rms for p in points], "#20a08f")
+            plot.addLine(y=7.1, pen=pg.mkPen("#ff4d5f", width=1, style=Qt.PenStyle.DashLine))
+        elif metric == "hi":
+            self._plot_health_series(plot, health_points, [h.hi for h in health_points], "#20a08f")
+            plot.addLine(y=0.85, pen=pg.mkPen("#ff4d5f", width=1, style=Qt.PenStyle.DashLine))
+        elif metric == "temperature":
+            self._plot_telemetry_series(plot, points, [p.temperature for p in points], "#ff8a3d")
+        elif metric == "crest":
+            self._plot_telemetry_series(plot, points, [p.crest_factor for p in points], "#f0c64b")
+        elif metric == "rpm":
+            self._plot_telemetry_series(plot, points, [p.rpm for p in points], "#7cb6ff")
+        elif metric == "rul":
+            values = [min(420.0, h.rul_hours / 24.0) for h in health_points]
+            self._plot_health_series(plot, health_points, values, "#7cb6ff")
+            plot.addLine(y=30, pen=pg.mkPen("#ff8a3d", width=1, style=Qt.PenStyle.DashLine))
+        elif metric == "spectrum" and point and point.spectrum:
+            plot.plot(point.spectrum.frequencies, point.spectrum.amplitudes, pen=pg.mkPen("#f0c64b", width=2))
+        elif metric == "components" and point:
+            labels = ["1x", "2x", "BRG", "BB"]
+            values = [point.one_x_amplitude, point.two_x_amplitude, point.bearing_band_energy, point.broadband_energy]
+            plot.addItem(pg.BarGraphItem(x=list(range(len(values))), height=values, width=0.42, brush=QColor("#20a08f"), labels=labels))
+
+    def _plot_telemetry_series(self, plot: pg.PlotWidget, points, values: list[float], color: str) -> None:
+        if not points or not values:
+            return
+        x = _relative_seconds([p.timestamp for p in points])
+        y = list(values)
+        if len(x) == 1:
+            x = [0.0, 1.0]
+            y = [y[0], y[0]]
+        plot.plot(x, y, pen=pg.mkPen(color, width=2))
+
+    def _plot_health_series(self, plot: pg.PlotWidget, points, values: list[float], color: str) -> None:
+        if not points or not values:
+            return
+        x = _relative_seconds([p.timestamp for p in points])
+        y = list(values)
+        if len(x) == 1:
+            x = [0.0, 1.0]
+            y = [y[0], y[0]]
+        plot.plot(x, y, pen=pg.mkPen(color, width=2))
+
+    def _dynamic_chart_meta(self, metric: str) -> tuple[str, str, str]:
+        return {
+            "vibration": ("", "сек", "мм/с"),
+            "hi": ("", "сек", "HI"),
+            "temperature": ("", "сек", "°C"),
+            "crest": ("", "сек", "индекс"),
+            "spectrum": ("", "Гц", "ампл."),
+            "components": ("", "признак", "ампл."),
+            "rpm": ("", "сек", "об/мин"),
+            "rul": ("", "сек", "сут"),
+        }.get(metric, ("", "сек", "значение"))
+
     def _update_history(self) -> None:
         state = self._selected_state(self.history_device_combo)
         if not state or not hasattr(self, "history_plot_interactive"):

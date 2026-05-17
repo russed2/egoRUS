@@ -149,6 +149,14 @@ class MonitorController:
             state = self.states.get(point.equipment_id)
             if state is None:
                 continue
+
+            if state.health is not None:
+                alpha = 0.04 # Коэффициент плавности (4% новых данных, 96% старых)
+                health.hi = (health.hi * alpha) + (state.health.hi * (1.0 - alpha))
+                health.trend_per_hour = (health.trend_per_hour * alpha) + (state.health.trend_per_hour * (1.0 - alpha))
+                health.rul_hours = (health.rul_hours * alpha) + (state.health.rul_hours * (1.0 - alpha))
+            
+            snapshots.append(health)
             state.telemetry = point
             state.health = health
             state.telemetry_history.append(point)
