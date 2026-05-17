@@ -183,6 +183,12 @@ class MainWindow(QMainWindow):
         self.overview_plot = real_pg.PlotWidget()
         self.overview_plot.setBackground("#121b23")
         self._style_plot(self.overview_plot, "Тренд индекса состояния HI", "сек", "HI")
+        
+        self.overview_plot.getPlotItem().getAxis("left").enableAutoSIPrefix(False)
+        self.overview_plot.getPlotItem().setMenuEnabled(False)
+        self.overview_plot.getPlotItem().getViewBox().setMenuEnabled(False)
+        self.overview_plot.getPlotItem().getViewBox().setLimits(xMin=0, yMin=0, yMax=1.05)
+
         layout.addWidget(self.overview_plot, 1)
         return page
 
@@ -700,7 +706,7 @@ class MainWindow(QMainWindow):
 
         if not hasattr(self, '_overview_lines'):
             self.overview_plot.clear()
-            self._style_plot(self.overview_plot, "Тренд индекса состояния HI", "сек", "HI")
+            self.overview_plot.setYRange(0.0, 1.05, padding=0)
             self.overview_plot.addLine(y=0.85, pen=real_pg.mkPen("#ff4d5f", width=1, style=Qt.PenStyle.DashLine))
             colors = ["#20a08f", "#f0c64b", "#ff8a3d", "#7cb6ff", "#d879ff"]
             self._overview_lines = [self.overview_plot.plot([], [], pen=real_pg.mkPen(c, width=2)) for c in colors]
@@ -708,9 +714,11 @@ class MainWindow(QMainWindow):
         for index, state in enumerate(states[:5]):
             if not state.history:
                 continue
-            x = _relative_seconds([h.timestamp for h in state.history[-120:]])
-            y = [h.hi for h in state.history[-120:]]
-            if len(x) == 1: 
+                
+            x = _relative_seconds([h.timestamp for h in state.history])
+            y = [h.hi for h in state.history]
+            
+            if len(x) == 1:
                 x, y = [0.0, 1.0], [y[0], y[0]]
             self._overview_lines[index].setData(x, y)
 
@@ -845,23 +853,48 @@ class MainWindow(QMainWindow):
 
         # === 1. ЛЕВЫЙ ГРАФИК (Прогноз HI) ===
         try:
-            hours = min(max(health.rul_hours, 2.0), 240.0)
-            xs = [i * hours / 30 for i in range(31)]
+            # 1. Горизонт планирования: если всё хорошо, смотрим на 30 дней (720 часов) вперед.
+            # Если всё плохо - ось X сжимается до точного времени смерти (RUL).
+            max_plot_hours = min(health.rul_hours, 720.0) 
+            if max_plot_hours < 2.0:
+                max_plot_hours = 2.0
+                
+            self.forecast_plot.setXRange(0, max_plot_hours, padding=0.05)
             
+            xs = [i * max_plot_hours / 30 for i in range(31)]
             ys, ys_upper, ys_lower = [], [], []
+            
             uncertainty_factor = 1.0 - health.confidence 
 
-            for x in xs:
-                if health.rul_hours >= 9990 or health.trend_per_hour <= 0:
-                    y = health.hi
-                    cone_width = 0.01 
-                else:
-                    y = health.hi + health.trend_per_hour * x
-                    cone_width = 0.01 + (uncertainty_factor * (x / hours)**1.2 * 0.4)
+            # 2. КИНЕМАТИЧЕСКАЯ ФИЗИЧЕСКАЯ МОДЕЛЬ
+            # v - текущая реальная скорость износа (тренд)
+            v = max(0.0, health.trend_per_hour)
+            rul = health.rul_hours
 
-                ys.append(min(1.0, y))
-                ys_upper.append(min(1.0, y + cone_width))
-                ys_lower.append(max(0.0, y - cone_width))
+            # c - ускорение деградации. 
+            # Вычисляется ТОЛЬКО если линейного тренда не хватает, чтобы добить станок к сроку RUL.
+            if rul < 9990 and health.hi < 1.0:
+                expected_linear_end = health.hi + v * rul
+                if expected_linear_end < 1.0:
+                    c = (1.0 - expected_linear_end) / (rul ** 2)
+                else:
+                    c = 0.0 # Тренд уже достаточно резкий
+            else:
+                c = 0.0
+
+            for x in xs:
+                if rul >= 9990 or health.hi >= 1.0:
+                    y = health.hi
+                else:
+                    # y = начальная точка + (скорость * время) + (ускорение * время в квадрате)
+                    y = health.hi + v * x + c * (x ** 2)
+
+                # Погрешность (конус) растет линейно от 0 до макс. значения к концу графика
+                current_cone = (x / max_plot_hours) * uncertainty_factor * 0.15
+
+                ys.append(min(1.0, max(0.0, y)))
+                ys_upper.append(min(1.0, y + current_cone))
+                ys_lower.append(max(0.0, y - current_cone))
 
             if is_new_eq or not hasattr(self, '_forecast_lines'):
                 self.forecast_plot.clear()
@@ -883,8 +916,8 @@ class MainWindow(QMainWindow):
                 l2.setData(xs, ys_upper)
                 l3.setData(xs, ys_lower)
                 
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Ошибка отрисовки прогноза: {e}")
 
         # === 2. ПРАВЫЙ ГРАФИК (Признаки узлов) ===
         try:
