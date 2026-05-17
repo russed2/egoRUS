@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import threading
 import pyqtgraph as real_pg
 from datetime import datetime, timezone
@@ -11,6 +12,7 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -77,7 +79,7 @@ class MainWindow(QMainWindow):
         self.timer.timeout.connect(self._on_tick)
         self.timer.start()
 
-    def closeEvent(self, event) -> None:  # type: ignore[override]
+    def closeEvent(self, event) -> None:  
         self.controller.stop_influx()
         super().closeEvent(event)
 
@@ -102,13 +104,13 @@ class MainWindow(QMainWindow):
         side.addSpacing(16)
 
         nav = [
-            ("Обзор парка", "Состояние всех агрегатов"),
+            ("Обзор оборудования", "Состояние всех агрегатов"),
             ("Реальное время", "Текущие значения и графики"),
             ("История", "Архив телеметрии"),
             ("Предиктивная аналитика", "HI, RUL и дефекты"),
             ("Эмулятор", "Сценарии и поломки"),
             ("Оборудование", "Устройства и датчики"),
-            ("Подключения", "InfluxDB и адаптеры"),
+            ("Подключения", "Управление сетью и БД"),
         ]
         for index, (label, tooltip) in enumerate(nav):
             button = QPushButton(label)
@@ -149,7 +151,7 @@ class MainWindow(QMainWindow):
             self._update_current_page()
 
     def _dashboard_page(self) -> QWidget:
-        page = self._page("Обзор парка оборудования")
+        page = self._page("Обзор оборудования")
         layout = page.layout()
         assert isinstance(layout, QVBoxLayout)
 
@@ -163,7 +165,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(kpis)
 
         middle = QHBoxLayout()
-        fleet_panel = self._panel("Парк агрегатов")
+        fleet_panel = self._panel("Список агрегатов")
         fleet_layout = fleet_panel.layout()
         assert isinstance(fleet_layout, QVBoxLayout)
         self.fleet_table = self._table(["Агрегат", "Локация", "HI", "Зона", "RUL", "Диагноз"])
@@ -178,7 +180,8 @@ class MainWindow(QMainWindow):
         middle.addWidget(events_panel, 2)
         layout.addLayout(middle, 1)
 
-        self.overview_plot = pg.PlotWidget()
+        self.overview_plot = real_pg.PlotWidget()
+        self.overview_plot.setBackground("#121b23")
         self._style_plot(self.overview_plot, "Тренд индекса состояния HI", "сек", "HI")
         layout.addWidget(self.overview_plot, 1)
         return page
@@ -216,11 +219,12 @@ class MainWindow(QMainWindow):
         layout.addLayout(metrics)
 
         plots = QHBoxLayout()
-        self.real_plot = pg.PlotWidget()
-        self._style_plot(self.real_plot, "Последняя минута: виброскорость", "сек", "мм/с")
+        self.real_plot = real_pg.PlotWidget()
+        self.real_plot.setBackground("#121b23")
         plots.addWidget(self.real_plot, 3)
-        self.spectrum_plot = pg.PlotWidget()
-        self._style_plot(self.spectrum_plot, "Спектр вибрации", "Гц", "ампл.")
+        
+        self.spectrum_plot = real_pg.PlotWidget()
+        self.spectrum_plot.setBackground("#121b23")
         plots.addWidget(self.spectrum_plot, 2)
         layout.addLayout(plots, 1)
         return page
@@ -238,7 +242,6 @@ class MainWindow(QMainWindow):
         self.history_metric_combo.addItems(["V RMS", "Health Index", "Температура", "Пик-фактор"])
         self.history_metric_combo.currentIndexChanged.connect(lambda _=0: self._update_history())
         
-        # --- ТВОЙ ПОЛНЫЙ СПИСОК ПЕРИОДОВ (В МИНУТАХ) ---
         self.history_period_combo = QComboBox()
         self.history_period_combo.addItem("За последние 30 минут", 30)
         self.history_period_combo.addItem("За последний час", 60)
@@ -257,6 +260,10 @@ class MainWindow(QMainWindow):
         refresh = QPushButton("Загрузить из БД")
         refresh.setObjectName("AccentButton")
         refresh.clicked.connect(self._update_history)
+
+        self.export_button = QPushButton("Экспорт в CSV")
+        self.export_button.clicked.connect(self._export_history_csv)
+        self.export_button.setEnabled(False)
         
         controls.addWidget(QLabel("Агрегат:"))
         controls.addWidget(self.history_device_combo, 2)
@@ -265,33 +272,24 @@ class MainWindow(QMainWindow):
         controls.addWidget(QLabel("Период:"))
         controls.addWidget(self.history_period_combo, 1)
         controls.addWidget(refresh)
+        controls.addWidget(self.export_button)
         layout.addLayout(controls)
 
-        # Подключаем DateAxisItem, чтобы нижняя ось автоматически подстраивалась под даты
         axis = real_pg.DateAxisItem(orientation='bottom')
         self.history_plot_interactive = real_pg.PlotWidget(axisItems={'bottom': axis})
         self.history_plot_interactive.setBackground("#121b23")
         self.history_plot_interactive.showGrid(x=True, y=True, alpha=0.3)
 
-        # Блокируем стандартное контекстное меню pyqtgraph на ПКМ
         self.history_plot_interactive.getPlotItem().setMenuEnabled(False)
         self.history_plot_interactive.getPlotItem().getViewBox().setMenuEnabled(False)
-        
-        # Запрещаем графику физически опускаться ниже нуля по Y
         self.history_plot_interactive.getPlotItem().getViewBox().setLimits(yMin=0)
-        
-        # Привязываем отслеживание кликов мыши НАПРЯМУЮ к контейнеру отображения ViewBox
         self.history_plot_interactive.scene().sigMouseClicked.connect(self._on_history_plot_clicked)
         
         layout.addWidget(self.history_plot_interactive, 1)
 
-        panel = self._panel("Архив InfluxDB")
-        panel_layout = panel.layout()
-        assert isinstance(panel_layout, QVBoxLayout)
         self.history_status = QLabel("Выберите параметры и нажмите 'Загрузить из БД'.")
         self.history_status.setObjectName("Muted")
-        panel_layout.addWidget(self.history_status)
-        layout.addWidget(panel)
+        layout.addWidget(self.history_status)
         return page
 
     def _analytics_page(self) -> QWidget:
@@ -343,17 +341,24 @@ class MainWindow(QMainWindow):
         layout.addLayout(grid)
 
         plots = QHBoxLayout()
-        self.forecast_plot = pg.PlotWidget()
+        self.forecast_plot = real_pg.PlotWidget()
+        self.forecast_plot.setBackground("#121b23")
         self._style_plot(self.forecast_plot, "Прогноз HI до критического порога", "часы", "HI")
+        self.forecast_plot.getPlotItem().setMenuEnabled(False)
+        self.forecast_plot.getPlotItem().getViewBox().setMenuEnabled(False)
+        self.forecast_plot.getPlotItem().getViewBox().setLimits(xMin=0, yMin=0, yMax=1.05)
+        self.forecast_plot.scene().sigMouseClicked.connect(self._on_forecast_plot_clicked)
         plots.addWidget(self.forecast_plot, 3)
-        self.component_plot = pg.PlotWidget()
+        
+        self.component_plot = real_pg.PlotWidget()
+        self.component_plot.setBackground("#121b23")
         self._style_plot(self.component_plot, "Диагностические признаки узлов", "узел", "ампл.")
         plots.addWidget(self.component_plot, 2)
         layout.addLayout(plots, 1)
         return page
 
     def _emulator_page(self) -> QWidget:
-        page = self._page("Эмулятор дефектов и реакция графиков")
+        page = self._page("Эмулятор дефектов")
         layout = page.layout()
         assert isinstance(layout, QVBoxLayout)
 
@@ -432,6 +437,7 @@ class MainWindow(QMainWindow):
         self.emulator_chart_cards: list[dict[str, object]] = []
         scroll.setWidget(self.emulator_charts_host)
         layout.addWidget(scroll, 1)
+        
         for metric in ["vibration", "hi", "spectrum", "components"]:
             self._add_emulator_chart(metric)
         return page
@@ -447,7 +453,7 @@ class MainWindow(QMainWindow):
         self.equipment_table = self._table(["ID", "Название", "Тип", "Локация", "RPM", "кВт"])
         equipment_layout.addWidget(self.equipment_table)
 
-        add_panel = self._panel("Добавить агрегат в демо-контур")
+        add_panel = self._panel("Добавить агрегат в контур")
         add_layout = add_panel.layout()
         assert isinstance(add_layout, QVBoxLayout)
         form = QHBoxLayout()
@@ -589,7 +595,7 @@ class MainWindow(QMainWindow):
         table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         return table
 
-    def _style_plot(self, plot: pg.PlotWidget, title: str, bottom: str, left: str) -> None:
+    def _style_plot(self, plot: real_pg.PlotWidget, title: str, bottom: str, left: str) -> None:
         plot.setTitle(title, color="#f0f6f6", size="12pt")
         plot.showGrid(x=True, y=True, alpha=0.22)
         plot.setLabel("bottom", bottom)
@@ -621,17 +627,12 @@ class MainWindow(QMainWindow):
         if self._ui_tick_counter % 5 == 0:
             self._update_connection_status()
             
-        # --- ПРОВЕРКА НАЙДЕННЫХ УСТРОЙСТВ ---
         if getattr(self, "_is_scanning_mqtt", False):
             if self.controller.discovered_devices:
-                # Берем первый пойманный сигнал
                 found_id = list(self.controller.discovered_devices.keys())[0]
-                
-                self.new_name.setText(found_id) # Вписываем ID в форму
-                self._stop_mqtt_scan_ui()       # Закрываем порт
+                self.new_name.setText(found_id) 
+                self._stop_mqtt_scan_ui()       
                 self.controller.discovered_devices.clear()
-                
-                # Автоматически переключаем интерфейс на вкладку "Оборудование" (индекс 5)
                 self._select_page(5) 
                 QMessageBox.information(self, "Устройство найдено!", f"Успешно перехвачен сигнал от внешнего датчика: {found_id}.\nДозаполните параметры (Локация, Мощность) и нажмите кнопку 'Добавить'.")
 
@@ -649,8 +650,6 @@ class MainWindow(QMainWindow):
             self._update_dashboard()
         elif index == 1:
             self._update_realtime()
-        elif index == 2:
-            pass
         elif index == 3:
             self._update_analytics()
         elif index == 4:
@@ -699,20 +698,27 @@ class MainWindow(QMainWindow):
             values = [local_time, equipment.equipment.name if equipment else event.equipment_id, event.title, event.details]
             self._set_row(self.event_table, row, values, event.risk_zone)
 
-        self.overview_plot.clear()
-        colors = ["#20a08f", "#f0c64b", "#ff8a3d", "#7cb6ff", "#d879ff"]
+        if not hasattr(self, '_overview_lines'):
+            self.overview_plot.clear()
+            self._style_plot(self.overview_plot, "Тренд индекса состояния HI", "сек", "HI")
+            self.overview_plot.addLine(y=0.85, pen=real_pg.mkPen("#ff4d5f", width=1, style=Qt.PenStyle.DashLine))
+            colors = ["#20a08f", "#f0c64b", "#ff8a3d", "#7cb6ff", "#d879ff"]
+            self._overview_lines = [self.overview_plot.plot([], [], pen=real_pg.mkPen(c, width=2)) for c in colors]
+
         for index, state in enumerate(states[:5]):
             if not state.history:
                 continue
             x = _relative_seconds([h.timestamp for h in state.history[-120:]])
             y = [h.hi for h in state.history[-120:]]
-            self.overview_plot.plot(x, y, pen=pg.mkPen(colors[index % len(colors)], width=2), name=state.equipment.name)
-        self.overview_plot.addLine(y=0.85, pen=pg.mkPen("#ff4d5f", width=1, style=Qt.PenStyle.DashLine))
+            if len(x) == 1: 
+                x, y = [0.0, 1.0], [y[0], y[0]]
+            self._overview_lines[index].setData(x, y)
 
     def _update_realtime(self) -> None:
         state = self._selected_state(self.real_device_combo)
         if not state or not state.telemetry:
             return
+            
         point = state.telemetry
         self.metric_labels["vibration"].setText(f"{point.vibration_rms:.2f}")
         self.metric_labels["crest"].setText(f"{point.crest_factor:.2f}")
@@ -722,159 +728,29 @@ class MainWindow(QMainWindow):
         self.metric_labels["loss"].setText(f"{point.packet_loss * 100:.1f}")
 
         points = state.telemetry_history[-60:]
-        self.real_plot.clear()
-        if points:
-            x = _relative_seconds([p.timestamp for p in points])
-            self.real_plot.plot(x, [p.vibration_rms for p in points], pen=pg.mkPen("#20a08f", width=3))
-            self.real_plot.addLine(y=7.1, pen=pg.mkPen("#ff4d5f", width=1, style=Qt.PenStyle.DashLine))
-        self.spectrum_plot.clear()
-        if point.spectrum:
-            self.spectrum_plot.plot(point.spectrum.frequencies, point.spectrum.amplitudes, pen=pg.mkPen("#f0c64b", width=2))
 
-    def _on_add_rt_chart_clicked(self) -> None:
-        eq_id = self.rt_add_device_combo.currentData()
-        metric = self.rt_add_metric_combo.currentData()
-        if eq_id and metric:
-            self._add_rt_chart(str(eq_id), str(metric))
-
-    def _add_rt_chart(self, eq_id: str, metric: str) -> None:
-        state = self.controller.states.get(eq_id)
-        if not state or not hasattr(self, "rt_charts_grid"):
-            return
+        if not hasattr(self, '_rt_line'):
+            self.real_plot.clear()
+            self._style_plot(self.real_plot, "Последняя минута: виброскорость", "сек", "мм/с")
+            self._rt_line = self.real_plot.plot([], [], pen=real_pg.mkPen("#20a08f", width=3))
+            self.real_plot.addLine(y=7.1, pen=real_pg.mkPen("#ff4d5f", width=1, style=Qt.PenStyle.DashLine))
             
-        eq_name = state.equipment.name
-        metric_name = dict(DYNAMIC_CHART_OPTIONS).get(metric, metric)
-        
-        card = QFrame()
-        card.setObjectName("Panel")
-        card.setMinimumHeight(300)
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(14, 14, 14, 14)
-        
-        header = QHBoxLayout()
-        title = QLabel(f"{eq_name} — {metric_name}")
-        title.setObjectName("SectionTitle")
-        remove = QPushButton("✖")
-        remove.setFixedWidth(30)
-        remove.clicked.connect(lambda _=False, target=card: self._remove_rt_chart(target))
-        header.addWidget(title)
-        header.addStretch()
-        header.addWidget(remove)
-        layout.addLayout(header)
+            self.spectrum_plot.clear()
+            self._style_plot(self.spectrum_plot, "Спектр вибрации", "Гц", "ампл.")
+            self._rt_spec_line = self.spectrum_plot.plot([], [], pen=real_pg.mkPen("#f0c64b", width=2))
 
-        plot = pg.PlotWidget()
-        plot.setMinimumHeight(230)
-        layout.addWidget(plot, 1)
-        
-        self.rt_chart_cards.append({"card": card, "plot": plot, "eq_id": eq_id, "metric": metric})
-        self._reflow_rt_charts()
-        self._update_rt_charts()
-
-    def _remove_rt_chart(self, target: QFrame) -> None:
-        for index, item in enumerate(list(self.rt_chart_cards)):
-            if item["card"] is target:
-                self.rt_charts_grid.removeWidget(target)
-                target.setParent(None)
-                target.deleteLater()
-                del self.rt_chart_cards[index]
-                break
-        self._reflow_rt_charts()
-
-    def _clear_rt_charts(self) -> None:
-        for item in list(self.rt_chart_cards):
-            card = item["card"]
-            assert isinstance(card, QFrame)
-            self.rt_charts_grid.removeWidget(card)
-            card.setParent(None)
-            card.deleteLater()
-        self.rt_chart_cards.clear()
-
-    def _reflow_rt_charts(self) -> None:
-        for item in self.rt_chart_cards:
-            card = item["card"]
-            assert isinstance(card, QFrame)
-            self.rt_charts_grid.removeWidget(card)
-        for index, item in enumerate(self.rt_chart_cards):
-            card = item["card"]
-            assert isinstance(card, QFrame)
-            self.rt_charts_grid.addWidget(card, index // 2, index % 2)
-        self.rt_charts_grid.setColumnStretch(0, 1)
-        self.rt_charts_grid.setColumnStretch(1, 1)
-
-    def _update_rt_charts(self) -> None:
-        for item in getattr(self, "rt_chart_cards", []):
-            eq_id = item["eq_id"]
-            metric = item["metric"]
-            plot = item["plot"]
-            assert isinstance(plot, pg.PlotWidget)
-            state = self.controller.states.get(eq_id)
-            self._draw_dynamic_chart(plot, str(metric), state)
-
-    def _draw_dynamic_chart(self, plot: pg.PlotWidget, metric: str, state: EquipmentState | None) -> None:
-        _, bottom, left = self._dynamic_chart_meta(metric)
-        plot.clear()
-        self._style_plot(plot, "", bottom, left) # Название уже есть в шапке панели
-        if not state:
-            return
-            
-        points = state.telemetry_history[-90:]
-        health_points = state.history[-90:]
-        point = state.telemetry
-
-        if metric == "vibration":
-            self._plot_telemetry_series(plot, points, [p.vibration_rms for p in points], "#20a08f")
-            plot.addLine(y=7.1, pen=pg.mkPen("#ff4d5f", width=1, style=Qt.PenStyle.DashLine))
-        elif metric == "hi":
-            self._plot_health_series(plot, health_points, [h.hi for h in health_points], "#20a08f")
-            plot.addLine(y=0.85, pen=pg.mkPen("#ff4d5f", width=1, style=Qt.PenStyle.DashLine))
-        elif metric == "temperature":
-            self._plot_telemetry_series(plot, points, [p.temperature for p in points], "#ff8a3d")
-        elif metric == "crest":
-            self._plot_telemetry_series(plot, points, [p.crest_factor for p in points], "#f0c64b")
-        elif metric == "rpm":
-            self._plot_telemetry_series(plot, points, [p.rpm for p in points], "#7cb6ff")
-        elif metric == "rul":
-            values = [min(420.0, h.rul_hours / 24.0) for h in health_points]
-            self._plot_health_series(plot, health_points, values, "#7cb6ff")
-            plot.addLine(y=30, pen=pg.mkPen("#ff8a3d", width=1, style=Qt.PenStyle.DashLine))
-        elif metric == "spectrum" and point and point.spectrum:
-            plot.plot(point.spectrum.frequencies, point.spectrum.amplitudes, pen=pg.mkPen("#f0c64b", width=2))
-        elif metric == "components" and point:
-            labels = ["1x", "2x", "BRG", "BB"]
-            values = [point.one_x_amplitude, point.two_x_amplitude, point.bearing_band_energy, point.broadband_energy]
-            plot.addItem(pg.BarGraphItem(x=list(range(len(values))), height=values, width=0.42, brush=QColor("#20a08f"), labels=labels))
-
-    def _plot_telemetry_series(self, plot: pg.PlotWidget, points, values: list[float], color: str) -> None:
-        if not points or not values:
-            return
-        x = _relative_seconds([p.timestamp for p in points])
-        y = list(values)
-        if len(x) == 1:
-            x = [0.0, 1.0]
-            y = [y[0], y[0]]
-        plot.plot(x, y, pen=pg.mkPen(color, width=2))
-
-    def _plot_health_series(self, plot: pg.PlotWidget, points, values: list[float], color: str) -> None:
-        if not points or not values:
-            return
-        x = _relative_seconds([p.timestamp for p in points])
-        y = list(values)
-        if len(x) == 1:
-            x = [0.0, 1.0]
-            y = [y[0], y[0]]
-        plot.plot(x, y, pen=pg.mkPen(color, width=2))
-
-    def _dynamic_chart_meta(self, metric: str) -> tuple[str, str, str]:
-        return {
-            "vibration": ("", "сек", "мм/с"),
-            "hi": ("", "сек", "HI"),
-            "temperature": ("", "сек", "°C"),
-            "crest": ("", "сек", "индекс"),
-            "spectrum": ("", "Гц", "ампл."),
-            "components": ("", "признак", "ампл."),
-            "rpm": ("", "сек", "об/мин"),
-            "rul": ("", "сек", "сут"),
-        }.get(metric, ("", "сек", "значение"))
+        try:
+            if points:
+                x = _relative_seconds([p.timestamp for p in points])
+                y = [p.vibration_rms for p in points]
+                if len(x) == 1: 
+                    x, y = [0.0, 1.0], [y[0], y[0]]
+                self._rt_line.setData(x, y)
+                
+            if point.spectrum:
+                self._rt_spec_line.setData(point.spectrum.frequencies, point.spectrum.amplitudes)
+        except:
+            pass
 
     def _update_history(self) -> None:
         state = self._selected_state(self.history_device_combo)
@@ -887,14 +763,20 @@ class MainWindow(QMainWindow):
         self.history_status.setText(f"Запрос к InfluxDB за последние {minutes_back} мин...")
         self.history_plot_interactive.clear()
         
-        # Сбрасываем старые лимиты по оси X перед новой загрузкой, сохраняя пол по Y >= 0
         self.history_plot_interactive.getPlotItem().getViewBox().setLimits(xMin=None, xMax=None, yMin=0)
         
         data = self.controller.influx.read_history(state.equipment.id, minutes_back=int(minutes_back))
+
+        self._last_history_data = data
+        self._last_history_metric = metric
+        self._last_history_eq_name = state.equipment.name
         
         if not isinstance(data, dict) or (not data.get("telemetry") and not data.get("health")):
             self.history_status.setText("Данные за выбранный период в базе не найдены.")
+            self.export_button.setEnabled(False)
             return
+        
+        self.export_button.setEnabled(True)
 
         x_coords = []
         y_coords = []
@@ -926,32 +808,30 @@ class MainWindow(QMainWindow):
             color = (124, 182, 255)
 
         if x_coords and y_coords:
-            # Строим линию графика
             self.history_plot_interactive.plot(x_coords, y_coords, pen=real_pg.mkPen(color=color, width=2))
             
-            # Настраиваем лимиты перемещения: пользователь сможет крутить и двигать график
-            # только в пределах загруженных данных плюс небольшие отступы по бокам
             time_range = max(x_coords) - min(x_coords)
             padding = time_range * 0.05 if time_range > 0 else 60
             
             self.history_plot_interactive.getPlotItem().getViewBox().setLimits(
                 xMin=min(x_coords) - padding,
                 xMax=max(x_coords) + padding,
-                yMin=0 # Полная блокировка ухода в минус по вертикали
+                yMin=0 
             )
             
-            # Возвращаем фокус на свежие данные
             self.history_plot_interactive.autoRange()
             self.history_status.setText(f"Успешно загружено {len(x_coords)} точек. Управление: Колёсико — Зум, ЛКМ — Перетаскивание, ПКМ — Сброс вида.")
         else:
             self.history_status.setText("В базе нет данных за этот временной отрезок.")
-            
+
     def _update_analytics(self) -> None:
         state = self._selected_state(self.analytics_device_combo)
         if not state or not state.health:
             return
+            
         health = state.health
         point = state.telemetry
+        
         self.hi_value.setText(f"{health.hi:.2f}")
         self.zone_label.setText(f"Зона {health.risk_zone.value}: {health.risk_zone.title}")
         self.zone_label.setStyleSheet(f"color: {health.risk_zone.color}; font-weight: 700;")
@@ -960,24 +840,79 @@ class MainWindow(QMainWindow):
         self.diagnosis_label.setText(health.diagnosis)
         self.recommendation_label.setText(health.recommendation)
 
-        self.forecast_plot.clear()
-        hours = min(max(health.rul_hours, 2.0), 240.0)
-        xs = [i * hours / 30 for i in range(31)]
-        if health.rul_hours >= 9990 or health.trend_per_hour <= 0:
-            ys = [health.hi for _ in xs]
-        else:
-            ys = [min(1.0, health.hi + health.trend_per_hour * x) for x in xs]
-        self.forecast_plot.plot(xs, ys, pen=pg.mkPen("#20a08f", width=3))
-        self.forecast_plot.plot(xs, [min(1.0, y + 0.07) for y in ys], pen=pg.mkPen("#ff8a3d", width=1, style=Qt.PenStyle.DotLine))
-        self.forecast_plot.plot(xs, [max(0.0, y - 0.05) for y in ys], pen=pg.mkPen("#7cb6ff", width=1, style=Qt.PenStyle.DotLine))
-        self.forecast_plot.addLine(y=0.85, pen=pg.mkPen("#ff4d5f", width=1, style=Qt.PenStyle.DashLine))
+        current_eq_id = state.equipment.id
+        is_new_eq = getattr(self, '_last_analytics_eq', None) != current_eq_id
 
-        self.component_plot.clear()
-        if point:
-            labels = ["1x", "2x", "BRG", "BB"]
-            values = [point.one_x_amplitude, point.two_x_amplitude, point.bearing_band_energy, point.broadband_energy]
-            bar = pg.BarGraphItem(x=list(range(len(values))), height=values, width=0.42, brush=QColor("#20a08f"), labels=labels)
-            self.component_plot.addItem(bar)
+        # === 1. ЛЕВЫЙ ГРАФИК (Прогноз HI) ===
+        try:
+            hours = min(max(health.rul_hours, 2.0), 240.0)
+            xs = [i * hours / 30 for i in range(31)]
+            
+            ys, ys_upper, ys_lower = [], [], []
+            uncertainty_factor = 1.0 - health.confidence 
+
+            for x in xs:
+                if health.rul_hours >= 9990 or health.trend_per_hour <= 0:
+                    y = health.hi
+                    cone_width = 0.01 
+                else:
+                    y = health.hi + health.trend_per_hour * x
+                    cone_width = 0.01 + (uncertainty_factor * (x / hours)**1.2 * 0.4)
+
+                ys.append(min(1.0, y))
+                ys_upper.append(min(1.0, y + cone_width))
+                ys_lower.append(max(0.0, y - cone_width))
+
+            if is_new_eq or not hasattr(self, '_forecast_lines'):
+                self.forecast_plot.clear()
+                self.forecast_plot.getPlotItem().getViewBox().setYRange(0.0, 1.05, padding=0)
+                
+                y_axis = self.forecast_plot.getPlotItem().getAxis("left")
+                ticks_list = [(i / 10.0, f"{i / 10.0:.1f}") for i in range(11)]
+                y_axis.setTicks([ticks_list])
+
+                l1 = self.forecast_plot.plot(xs, ys, pen=real_pg.mkPen("#20a08f", width=3))
+                l2 = self.forecast_plot.plot(xs, ys_upper, pen=real_pg.mkPen("#ff8a3d", width=1, style=Qt.PenStyle.DotLine))
+                l3 = self.forecast_plot.plot(xs, ys_lower, pen=real_pg.mkPen("#7cb6ff", width=1, style=Qt.PenStyle.DotLine))
+                self.forecast_plot.addLine(y=0.85, pen=real_pg.mkPen("#ff4d5f", width=1, style=Qt.PenStyle.DashLine))
+                
+                self._forecast_lines = (l1, l2, l3)
+            else:
+                l1, l2, l3 = self._forecast_lines
+                l1.setData(xs, ys)
+                l2.setData(xs, ys_upper)
+                l3.setData(xs, ys_lower)
+                
+        except Exception:
+            pass
+
+        # === 2. ПРАВЫЙ ГРАФИК (Признаки узлов) ===
+        try:
+            if point:
+                labels = ["1x", "2x", "BRG", "BB"]
+                values = [point.one_x_amplitude, point.two_x_amplitude, point.bearing_band_energy, point.broadband_energy]
+                
+                if is_new_eq or not hasattr(self, '_component_bar'):
+                    self.component_plot.clear()
+                    
+                    self._component_bar = real_pg.BarGraphItem(
+                        x=list(range(len(values))), 
+                        height=values, 
+                        width=0.42, 
+                        brush=real_pg.mkBrush("#20a08f")
+                    )
+                    self.component_plot.addItem(self._component_bar)
+                    
+                    x_axis = self.component_plot.getPlotItem().getAxis("bottom")
+                    x_ticks = [(i, labels[i]) for i in range(len(labels))]
+                    x_axis.setTicks([x_ticks])
+                else:
+                    self._component_bar.setOpts(height=values)
+                    
+        except Exception:
+            pass
+
+        self._last_analytics_eq = current_eq_id
 
     def _update_emulator_page(self) -> None:
         self._update_active_fault_table()
@@ -1043,7 +978,8 @@ class MainWindow(QMainWindow):
         row.addWidget(remove)
         card_layout.addLayout(row)
 
-        plot = pg.PlotWidget()
+        plot = real_pg.PlotWidget()
+        plot.setBackground("#121b23")
         plot.setMinimumHeight(230)
         card_layout.addWidget(plot, 1)
         self.emulator_chart_cards.append({"card": card, "combo": combo, "plot": plot})
@@ -1093,64 +1029,100 @@ class MainWindow(QMainWindow):
             combo = item["combo"]
             plot = item["plot"]
             assert isinstance(combo, QComboBox)
-            assert isinstance(plot, pg.PlotWidget)
+            assert isinstance(plot, real_pg.PlotWidget)
             self._draw_emulator_chart(plot, str(combo.currentData()), state)
 
-    def _draw_emulator_chart(self, plot: pg.PlotWidget, metric: str, state: EquipmentState | None) -> None:
+    def _draw_emulator_chart(self, plot: real_pg.PlotWidget, metric: str, state: EquipmentState | None) -> None:
         title, bottom, left = self._emulator_chart_meta(metric)
-        plot.clear()
-        self._style_plot(plot, title, bottom, left)
+        
+        current_metric = getattr(plot, '_current_metric', None)
+        
+        if current_metric != metric:
+            plot.clear()
+            self._style_plot(plot, title, bottom, left)
+            plot._current_metric = metric
+            
+            if metric == "vibration":
+                plot._l1 = plot.plot([], [], pen=real_pg.mkPen("#20a08f", width=2))
+                plot.addLine(y=7.1, pen=real_pg.mkPen("#ff4d5f", width=1, style=Qt.PenStyle.DashLine))
+            elif metric == "hi":
+                plot._l1 = plot.plot([], [], pen=real_pg.mkPen("#20a08f", width=2))
+                plot.addLine(y=0.85, pen=real_pg.mkPen("#ff4d5f", width=1, style=Qt.PenStyle.DashLine))
+            elif metric == "temperature":
+                plot._l1 = plot.plot([], [], pen=real_pg.mkPen("#ff8a3d", width=2))
+            elif metric == "crest":
+                plot._l1 = plot.plot([], [], pen=real_pg.mkPen("#f0c64b", width=2))
+            elif metric == "quality":
+                plot._l1 = plot.plot([], [], pen=real_pg.mkPen("#35d07f", width=2))
+                plot._l2 = plot.plot([], [], pen=real_pg.mkPen("#ff4d5f", width=2))
+            elif metric == "rpm":
+                plot._l1 = plot.plot([], [], pen=real_pg.mkPen("#7cb6ff", width=2))
+            elif metric == "rul":
+                plot._l1 = plot.plot([], [], pen=real_pg.mkPen("#7cb6ff", width=2))
+                plot.addLine(y=30, pen=real_pg.mkPen("#ff8a3d", width=1, style=Qt.PenStyle.DashLine))
+            elif metric == "spectrum":
+                plot._l1 = plot.plot([], [], pen=real_pg.mkPen("#f0c64b", width=2))
+            elif metric == "components":
+                labels = ["1x", "2x", "BRG", "BB"]
+                plot._bar = real_pg.BarGraphItem(x=list(range(4)), height=[0,0,0,0], width=0.42, brush=real_pg.mkBrush("#20a08f"))
+                plot.addItem(plot._bar)
+                x_axis = plot.getPlotItem().getAxis("bottom")
+                x_axis.setTicks([[(i, labels[i]) for i in range(4)]])
+
         if not state:
             return
+            
         points = state.telemetry_history[-90:]
         health_points = state.history[-90:]
         point = state.telemetry
 
-        if metric == "vibration":
-            self._plot_telemetry_series(plot, points, [p.vibration_rms for p in points], "#20a08f")
-            plot.addLine(y=7.1, pen=pg.mkPen("#ff4d5f", width=1, style=Qt.PenStyle.DashLine))
-        elif metric == "hi":
-            self._plot_health_series(plot, health_points, [h.hi for h in health_points], "#20a08f")
-            plot.addLine(y=0.85, pen=pg.mkPen("#ff4d5f", width=1, style=Qt.PenStyle.DashLine))
-        elif metric == "temperature":
-            self._plot_telemetry_series(plot, points, [p.temperature for p in points], "#ff8a3d")
-        elif metric == "crest":
-            self._plot_telemetry_series(plot, points, [p.crest_factor for p in points], "#f0c64b")
-        elif metric == "quality":
-            self._plot_telemetry_series(plot, points, [p.signal_quality * 100 for p in points], "#35d07f")
-            self._plot_telemetry_series(plot, points, [p.packet_loss * 100 for p in points], "#ff4d5f")
-        elif metric == "rpm":
-            self._plot_telemetry_series(plot, points, [p.rpm for p in points], "#7cb6ff")
-        elif metric == "rul":
-            values = [min(420.0, h.rul_hours / 24.0) for h in health_points]
-            self._plot_health_series(plot, health_points, values, "#7cb6ff")
-            plot.addLine(y=30, pen=pg.mkPen("#ff8a3d", width=1, style=Qt.PenStyle.DashLine))
-        elif metric == "spectrum" and point and point.spectrum:
-            plot.plot(point.spectrum.frequencies, point.spectrum.amplitudes, pen=pg.mkPen("#f0c64b", width=2))
-        elif metric == "components" and point:
-            labels = ["1x", "2x", "BRG", "BB"]
-            values = [point.one_x_amplitude, point.two_x_amplitude, point.bearing_band_energy, point.broadband_energy]
-            plot.addItem(pg.BarGraphItem(x=list(range(len(values))), height=values, width=0.42, brush=QColor("#20a08f"), labels=labels))
-
-    def _plot_telemetry_series(self, plot: pg.PlotWidget, points, values: list[float], color: str) -> None:
-        if not points or not values:
-            return
-        x = _relative_seconds([p.timestamp for p in points])
-        y = list(values)
-        if len(x) == 1:
-            x = [0.0, 1.0]
-            y = [y[0], y[0]]
-        plot.plot(x, y, pen=pg.mkPen(color, width=2))
-
-    def _plot_health_series(self, plot: pg.PlotWidget, points, values: list[float], color: str) -> None:
-        if not points or not values:
-            return
-        x = _relative_seconds([p.timestamp for p in points])
-        y = list(values)
-        if len(x) == 1:
-            x = [0.0, 1.0]
-            y = [y[0], y[0]]
-        plot.plot(x, y, pen=pg.mkPen(color, width=2))
+        try:
+            if metric == "vibration" and points:
+                x = _relative_seconds([p.timestamp for p in points])
+                y = [p.vibration_rms for p in points]
+                if len(x) == 1: x, y = [0.0, 1.0], [y[0], y[0]]
+                plot._l1.setData(x, y)
+            elif metric == "hi" and health_points:
+                x = _relative_seconds([p.timestamp for p in health_points])
+                y = [h.hi for h in health_points]
+                if len(x) == 1: x, y = [0.0, 1.0], [y[0], y[0]]
+                plot._l1.setData(x, y)
+            elif metric == "temperature" and points:
+                x = _relative_seconds([p.timestamp for p in points])
+                y = [p.temperature for p in points]
+                if len(x) == 1: x, y = [0.0, 1.0], [y[0], y[0]]
+                plot._l1.setData(x, y)
+            elif metric == "crest" and points:
+                x = _relative_seconds([p.timestamp for p in points])
+                y = [p.crest_factor for p in points]
+                if len(x) == 1: x, y = [0.0, 1.0], [y[0], y[0]]
+                plot._l1.setData(x, y)
+            elif metric == "quality" and points:
+                x = _relative_seconds([p.timestamp for p in points])
+                y1 = [p.signal_quality * 100 for p in points]
+                y2 = [p.packet_loss * 100 for p in points]
+                if len(x) == 1: 
+                    x = [0.0, 1.0]
+                    y1, y2 = [y1[0], y1[0]], [y2[0], y2[0]]
+                plot._l1.setData(x, y1)
+                plot._l2.setData(x, y2)
+            elif metric == "rpm" and points:
+                x = _relative_seconds([p.timestamp for p in points])
+                y = [p.rpm for p in points]
+                if len(x) == 1: x, y = [0.0, 1.0], [y[0], y[0]]
+                plot._l1.setData(x, y)
+            elif metric == "rul" and health_points:
+                x = _relative_seconds([p.timestamp for p in health_points])
+                y = [min(420.0, h.rul_hours / 24.0) for h in health_points]
+                if len(x) == 1: x, y = [0.0, 1.0], [y[0], y[0]]
+                plot._l1.setData(x, y)
+            elif metric == "spectrum" and point and point.spectrum:
+                plot._l1.setData(point.spectrum.frequencies, point.spectrum.amplitudes)
+            elif metric == "components" and point:
+                values = [point.one_x_amplitude, point.two_x_amplitude, point.bearing_band_energy, point.broadband_energy]
+                plot._bar.setOpts(height=values)
+        except:
+            pass
 
     def _emulator_chart_meta(self, metric: str) -> tuple[str, str, str]:
         return {
@@ -1305,11 +1277,15 @@ class MainWindow(QMainWindow):
         threading.Thread(target=runner, name="egorus-influx-start", daemon=True).start()
 
     def _on_history_plot_clicked(self, event) -> None:
-        """Сброс зума к исходным границам данных при клике ПКМ"""
         if event.button() == Qt.MouseButton.RightButton:
             if hasattr(self, "history_plot_interactive"):
-             # Принудительно заставляем внутренний ViewBox сбросить масштаб до авто-границ
                 self.history_plot_interactive.getPlotItem().getViewBox().autoRange()
+                event.accept()
+
+    def _on_forecast_plot_clicked(self, event) -> None:
+        if event.button() == Qt.MouseButton.RightButton:
+            if hasattr(self, "forecast_plot"):
+                self.forecast_plot.getPlotItem().getViewBox().enableAutoRange(axis='x', enable=True)
                 event.accept()
     
     def _toggle_mqtt_scan(self) -> None:
@@ -1328,11 +1304,58 @@ class MainWindow(QMainWindow):
         self.scan_button.setStyleSheet("")
         self.controller.stop_mqtt_scan()
 
+    def _export_history_csv(self) -> None:
+        if not getattr(self, "_last_history_data", None):
+            return
+
+        data = self._last_history_data
+        metric = self._last_history_metric
+        eq_name = self._last_history_eq_name
+
+        rows = []
+        if metric == "Health Index":
+            for row in data.get("health", []):
+                rows.append([row.get('_time', ''), row.get('hi', 0)])
+        else:
+            for row in data.get("telemetry", []):
+                val = 0
+                if metric == "Температура": val = row.get('temperature', 0)
+                elif metric == "Пик-фактор": val = row.get('crest_factor', 0)
+                else: val = row.get('vibration_rms', 0)
+                rows.append([row.get('_time', ''), val])
+
+        if not rows:
+            QMessageBox.warning(self, "Экспорт", "Нет данных для экспорта.")
+            return
+
+        clean_name = eq_name.replace(" ", "_").replace("/", "-")
+        default_filename = f"Export_{clean_name}_{metric}.csv"
+        
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, 
+            "Сохранить данные в CSV", 
+            default_filename, 
+            "CSV-таблицы (*.csv);;Все файлы (*)"
+        )
+
+        if not filepath:
+            return 
+
+        try:
+            with open(filepath, mode='w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f, delimiter=';')
+                writer.writerow(["Время InfluxDB (UTC)", metric]) 
+                for r in rows:
+                    formatted_val = str(r[1]).replace('.', ',')
+                    writer.writerow([r[0], formatted_val])
+                    
+            QMessageBox.information(self, "Успех", f"Данные успешно экспортированы!\nФайл сохранен: {filepath}")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить файл:\n{e}")
+
 def _relative_seconds(timestamps) -> list[float]:
     if not timestamps:
         return []
-    # Переводим всё в UTC формат
     ts_utc = [t.astimezone(timezone.utc) for t in timestamps]
-    # Находим САМУЮ РАННЮЮ точку в этом наборе, чтобы график железно начинался от 0
     first = min(ts_utc)
     return [(t - first).total_seconds() for t in ts_utc]
